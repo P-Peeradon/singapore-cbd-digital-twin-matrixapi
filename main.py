@@ -29,6 +29,31 @@ def health_check():
         "status": "HEALTHY", 
         "numpy_version": np.__version__ 
     }
+    
+@app.post("/matrix/extrude")
+def extrude_polygon(payload: TransformRequest):
+    # Homogeneous 4-vector representation
+    p = np.array([payload.point[0], payload.point[1], payload.point[2], 1.0])
+    # 4x4 Translation Matrix
+    T = np.identity(4)
+    T[0, 3] = payload.translation[0]
+    T[1, 3] = payload.translation[1]
+    T[2, 3] = payload.translation[2]
+    # 4x4 Rotation Matrix around Y-axis
+    theta = payload.rotation_y
+    R = np.identity(4)
+    R[0, 0] = np.cos(theta)
+    R[0, 2] = np.sin(theta)
+    R[2, 0] = -np.sin(theta)
+    R[2, 2] = np.cos(theta)
+    # Composite Affine Matrix: M = T * R
+    M = np.dot(T, R)
+    extruded_point = np.dot(M, p)
+    return {
+        "original": payload.point,
+        "extruded": extruded_point[:3].tolist(),
+        "matrix": M.tolist()
+    }
 
 @app.post("/matrix/transform") 
 def transform_point(payload: TransformRequest): 
