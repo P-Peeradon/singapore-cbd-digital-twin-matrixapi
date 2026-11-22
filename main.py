@@ -34,6 +34,20 @@ class ExtrusionMatrixResponse(BaseModel):
     prism: list[list[float]] 
     # 3 x (n \* (storeys + 1)) matrix 
     vertex_count: int
+
+class BoundingSphere(BaseModel): 
+    id: str 
+    center: list[float] # [x, y, z] 
+    radius: float 
+
+class FrustumCullingRequest(BaseModel): 
+    mvp_matrix: list[list[float]] # 4x4 MVP Matrix 
+    spheres: list[BoundingSphere] 
+
+class FrustumCullingResponse(BaseModel): 
+    total_objects: int 
+    visible_objects: list[str] 
+    culled_objects: list[str]
     
 @app.get("/health") 
 def health_check(): 
@@ -79,27 +93,46 @@ def compute_extrusion_matrix(payload: ExtrusionMatrixRequest):
         vertex_count=prism_matrix.shape[1] 
     )
 
-@app.post("/matrix/transform") 
-def transform_point(payload: TransformRequest): 
-    # Homogeneous 4-vector representation 
-    p = np.array([payload.point[0], payload.point[1], payload.point[2], 1.0]) 
-    # 4x4 Translation Matrix 
-    T = np.identity(4) 
-    T[0, 3] = payload.translation[0] 
-    T[1, 3] = payload.translation[1] 
-    T[2, 3] = payload.translation[2] 
-    # 4x4 Rotation Matrix around Y-axis 
-    theta = payload.rotation_y 
-    R = np.identity(4) 
-    R[0, 0] = np.cos(theta) 
-    R[0, 2] = np.sin(theta) 
-    R[2, 0] = -np.sin(theta) 
-    R[2, 2] = np.cos(theta) 
-    # Composite Affine Matrix: M = T * R 
-    M = np.dot(T, R) 
-    transformed = np.dot(M, p) 
-    return { 
-        "original": payload.point, 
-        "transformed": transformed[:3].tolist(), 
-        "matrix": M.tolist() 
-    }
+@app.post("/matrix/frustum-culling", response_model=FrustumCullingResponse) 
+def perform_frustum_culling(payload: FrustumCullingRequest): 
+    mvp = np.array(payload.mvp_matrix, dtype=np.float64) 
+    if mvp.shape != (4, 4): 
+        raise ValueError("MVP matrix must be 4x4") 
+    
+    # Extract 6 frustum planes (Left, Right, Bottom, Top, Near, Far) from MVP matrix 
+    planes = np.zeros((6, 4)) 
+    planes[0] = mvp[3, :] + mvp[0, :] # Left 
+    planes[1] = mvp[3, :] - mvp[0, :] # Right 
+    planes[2] = mvp[3, :] + mvp[1, :] # Bottom 
+    planes[3] = mvp[3, :] - mvp[1, :] # Top 
+    planes[4] = mvp[3, :] + mvp[2, :] # Near 
+    planes[5] = mvp[3, :] - mvp[2, :] # Far 
+    
+    # Normalize plane equations (Ax + By + Cz + D = 0) 
+    for i in range(6): 
+        norm = np.linalg.norm(planes[i, :3]) 
+        if norm > 0: 
+            planes[i] /= norm 
+        
+        visible = [] 
+        culled = [] 
+        for sphere in payload.spheres: 
+            center = np.array([sphere.center[0], sphere.center[1], sphere.center[2], 1.0]) 
+            r = sphere.radius 
+            is_visible = True 
+            
+            for i in range(6): 
+                # Distance from sphere center to plane 
+                dist = np.dot(planes[i], center) 
+                if dist < -r: 
+                    is_visible = False 
+                    break 
+                
+            if is_visible: visible.append(sphere.id) 
+            else: culled.append(sphere.id) 
+                
+            return FrustumCullingResponse(
+                total_objects=len(payload.spheres), 
+                visible_objects=visible, 
+                culled_objects=culled 
+            )
